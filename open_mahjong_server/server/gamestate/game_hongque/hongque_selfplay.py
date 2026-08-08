@@ -246,11 +246,13 @@ def main() -> None:
     parser.add_argument("--game-round", type=int, default=4)
     parser.add_argument("--base-seed", type=int, default=72001)
     parser.add_argument("--new", type=str, default="efficiency", help="new seat policy name")
+    parser.add_argument("--opponent", type=str, default="efficiency",
+                        help="policy name for the other three seats")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--no-rotate", action="store_true")
     args = parser.parse_args()
 
-    policies = [_seat(args.new)] + [EfficiencySeat()] * 3
+    policies = [_seat(args.new)] + [_seat(args.opponent)] * 3
     names = [p.name for p in policies]
     result = asyncio.run(run_matches(
         args.matches, args.game_round, policies, base_seed=args.base_seed,
