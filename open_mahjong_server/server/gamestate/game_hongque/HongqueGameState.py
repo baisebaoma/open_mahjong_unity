@@ -8,9 +8,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 from .efficiency_bot import choose_claim_plan, choose_turn_plan
-from .heuristic_bot import (
-    choose_claim_plan as choose_claim_plan_v2,
-    choose_turn_plan as choose_turn_plan_v2,
+from .heuristic_bot_v3 import (
+    OpponentView,
+    choose_claim_plan as choose_claim_plan_v3,
+    choose_turn_plan as choose_turn_plan_v3,
 )
 from .rules import (
     call_candidates,
@@ -1262,6 +1263,12 @@ class HongqueGameState:
                 wall_count = len(self.wall)
                 drawn_tile = player.drawn_tile
                 last_draw_was_supplement = player.last_draw_was_supplement
+            if heuristic_bot:
+                opponents_snapshot = tuple(
+                    OpponentView.from_player(opponent)
+                    for opponent in self.players
+                    if opponent.index != player_index
+                )
         if smart_bot:
             plan = await run_room_bot_cpu(
                 self,
@@ -1278,7 +1285,7 @@ class HongqueGameState:
         elif heuristic_bot:
             plan = await run_room_bot_cpu(
                 self,
-                choose_turn_plan_v2,
+                choose_turn_plan_v3,
                 hand_snapshot,
                 meld_snapshot,
                 visible_snapshot,
@@ -1287,6 +1294,7 @@ class HongqueGameState:
                 wall_count=wall_count,
                 drawn_tile=drawn_tile,
                 last_draw_was_supplement=last_draw_was_supplement,
+                opponents=opponents_snapshot,
             )
         else:
             result = await run_room_bot_cpu(
@@ -1392,7 +1400,7 @@ class HongqueGameState:
                 )
                 visible_snapshot = self._visible_codes_for(player_index)
             claim_fn = (
-                choose_claim_plan_v2 if self.players[player_index].user_id == 3
+                choose_claim_plan_v3 if self.players[player_index].user_id == 3
                 else choose_claim_plan
             )
             plan = await run_room_bot_cpu(

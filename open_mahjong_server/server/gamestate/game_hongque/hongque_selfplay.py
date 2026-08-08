@@ -179,6 +179,33 @@ class HeuristicSeat:
         return choose_claim_plan(player.hand, player.melds, candidates, visible_codes(state, player.index))
 
 
+class HeuristicV3Seat:
+    """v3 heuristic + threat-gated folding (defense) bot."""
+    name = "heuristic-v3"
+
+    def _opponents(self, state, player_index):
+        from server.gamestate.game_hongque.heuristic_bot_v3 import OpponentView
+        return tuple(
+            OpponentView.from_player(player)
+            for player in state.players
+            if player.index != player_index
+        )
+
+    def turn(self, state, player):
+        from server.gamestate.game_hongque.heuristic_bot_v3 import choose_turn_plan
+        return choose_turn_plan(
+            player.hand, player.melds, visible_codes(state, player.index),
+            kong_candidates(player.hand, player.melds),
+            supplements=player.supplements, wall_count=len(state.wall),
+            drawn_tile=player.drawn_tile, last_draw_was_supplement=player.last_draw_was_supplement,
+            opponents=self._opponents(state, player.index),
+        )
+
+    def claim(self, state, player, candidates):
+        from server.gamestate.game_hongque.heuristic_bot_v3 import choose_claim_plan
+        return choose_claim_plan(player.hand, player.melds, candidates, visible_codes(state, player.index))
+
+
 def rank_scores(scores: list) -> list:
     order = sorted(range(4), key=lambda i: (-scores[i], i))
     ranks = [0] * 4
@@ -237,6 +264,8 @@ def _seat(name: str):
         return EfficiencySeat()
     if name == "heuristic":
         return HeuristicSeat()
+    if name == "heuristic-v3":
+        return HeuristicV3Seat()
     raise KeyError(name)
 
 
