@@ -3,8 +3,13 @@
 Runs 4-seat matches (1 new bot + 3 old efficiency bots, or 4-seat same-policy)
 and reports per-seat net points, average rank, win/draw counts, avg fan.
 
+Parallel mode (default): seeds are sharded across ``--workers`` processes
+(``ProcessPoolExecutor``), each worker runs a contiguous seed range in its own
+event loop, results are merged in seed order.  This saturates all cores; use
+``--workers 1`` for the serial path.
+
 Usage:
-    python -m server.gamestate.game_hongque.hongque_selfplay --matches 20 --game-round 4 --new 1
+    python -m server.gamestate.game_hongque.hongque_selfplay --matches 100 --new heuristic-v3 --opponent efficiency
 """
 from __future__ import annotations
 
@@ -14,9 +19,10 @@ import os
 import random
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from statistics import mean
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 
 from server.gamestate.game_hongque.HongqueGameState import HongqueGameState  # noqa: E402
 from server.gamestate.game_hongque.rules import kong_candidates  # noqa: E402
@@ -206,6 +212,33 @@ class HeuristicV3Seat:
         return choose_claim_plan(player.hand, player.melds, candidates, visible_codes(state, player.index))
 
 
+class HeuristicV4Seat:
+    """v4 heuristic + own-value-aware defense + end-of-wall genbutsu."""
+    name = "heuristic-v4"
+
+    def _opponents(self, state, player_index):
+        from server.gamestate.game_hongque.heuristic_bot_v3 import OpponentView
+        return tuple(
+            OpponentView.from_player(player)
+            for player in state.players
+            if player.index != player_index
+        )
+
+    def turn(self, state, player):
+        from server.gamestate.game_hongque.heuristic_bot_v4 import choose_turn_plan
+        return choose_turn_plan(
+            player.hand, player.melds, visible_codes(state, player.index),
+            kong_candidates(player.hand, player.melds),
+            supplements=player.supplements, wall_count=len(state.wall),
+            drawn_tile=player.drawn_tile, last_draw_was_supplement=player.last_draw_was_supplement,
+            opponents=self._opponents(state, player.index),
+        )
+
+    def claim(self, state, player, candidates):
+        from server.gamestate.game_hongque.heuristic_bot_v4 import choose_claim_plan
+        return choose_claim_plan(player.hand, player.melds, candidates, visible_codes(state, player.index))
+
+
 def rank_scores(scores: list) -> list:
     order = sorted(range(4), key=lambda i: (-scores[i], i))
     ranks = [0] * 4
@@ -214,49 +247,125 @@ def rank_scores(scores: list) -> list:
     return ranks
 
 
-async def run_matches(matches: int, game_round: int, policies: list, base_seed: int = 72001,
-                      progress: bool = True, rotate_seat: bool = True) -> dict:
-    t0 = time.perf_counter()
-    # Stats are tracked per POLICY (index), not per seat — seats rotate.
+def _run_seed_range(base_seed: int, matches: int, game_round: int, policy_names: list,
+                    rotate_seat: bool = True, global_base: int = 0) -> dict:
+    """ProcessPool worker: run a contiguous seed range; returns per-policy stats.
+
+    ``policy_names`` is a list of 4 seat names (reconstructed via ``_seat`` in
+    this worker process, so the payload stays picklable across spawn).
+    ``global_base`` is the first seed of the whole batch, so seat rotation uses
+    the global match index (not the shard-local one) — this keeps the sharded
+    results byte-identical to the serial path.
+    """
+    policies = [_seat(n) for n in policy_names]
     per_policy_net = [0.0] * len(policies)
-    per_policy_rank = [[] for _ in range(len(policies))]
+    per_policy_rank: list[list[int]] = [[] for _ in range(len(policies))]
     per_policy_wins = [0] * len(policies)
     draws = 0
     all_fans: list[int] = []
     for i in range(matches):
         seed = base_seed + i
-        # Rotate policies through the 4 seats to cancel dealer / turn-order bias.
+        g = (seed - global_base) if global_base else i  # global match idx
         seat_policies = list(policies)
         if rotate_seat:
-            shift = i % 4
+            shift = g % 4
             seat_policies = [policies[(s - shift) % 4] for s in range(4)]
-        result = await play_game(seed, game_round, seat_policies)
+        result = asyncio.run(play_game(seed, game_round, seat_policies))
         scores = result["scores"]
         ranks = rank_scores(scores)
-        # Map per-seat outcome back to the policy that sat there.
         for s in range(4):
-            policy_idx = (s - (i % 4)) % 4 if rotate_seat else s
+            policy_idx = (s - (g % 4)) % 4 if rotate_seat else s
             others = [scores[j] for j in range(4) if j != s]
             per_policy_net[policy_idx] += scores[s] - mean(others)
             per_policy_rank[policy_idx].append(ranks[s])
             per_policy_wins[policy_idx] += result["wins"][s]
         draws += result["draws"]
         all_fans.extend(result["fan_totals"])
-        if progress:
-            print(f"[{i+1}/{matches}] seed={seed} scores={scores} ranks={ranks}", flush=True)
-    elapsed = time.perf_counter() - t0
-    out = {
+    return {
         "matches": matches,
-        "elapsed": elapsed,
+        "per_policy_net": per_policy_net,
+        "per_policy_rank": per_policy_rank,
+        "per_policy_wins": per_policy_wins,
+        "draws": draws,
+        "fan_totals": all_fans,
+    }
+
+
+def _merge_ranges(partials: list, matches: int, game_round: int) -> dict:
+    n_policies = len(partials[0]["per_policy_net"])
+    per_policy_net = [sum(p["per_policy_net"][i] for p in partials) for i in range(n_policies)]
+    per_policy_rank: list[list[int]] = [[] for _ in range(n_policies)]
+    for p in partials:
+        for i in range(n_policies):
+            per_policy_rank[i].extend(p["per_policy_rank"][i])
+    per_policy_wins = [sum(p["per_policy_wins"][i] for p in partials) for i in range(n_policies)]
+    draws = sum(p["draws"] for p in partials)
+    all_fans: list[int] = []
+    for p in partials:
+        all_fans.extend(p["fan_totals"])
+    return {
+        "matches": matches,
+        "elapsed": sum(p.get("elapsed", 0.0) for p in partials),
         "per_seat_net": [round(n, 2) for n in per_policy_net],
-        "per_seat_avg_rank": [round(mean(r), 3) for r in per_policy_rank],
+        "per_seat_avg_rank": [round(mean(r), 3) if r else 0.0 for r in per_policy_rank],
+        "per_policy_rank": per_policy_rank,
         "per_seat_wins": per_policy_wins,
         "draws": draws,
         "avg_fan": round(mean(all_fans), 2) if all_fans else 0,
         "wins_total": sum(per_policy_wins),
         "hands_total": matches * game_round * 4,
     }
-    return out
+
+
+async def run_matches(matches: int, game_round: int, policies: list, base_seed: int = 72001,
+                      progress: bool = True, rotate_seat: bool = True) -> dict:
+    """Serial runner (kept for compatibility); prefer ``run_matches_parallel``."""
+    t0 = time.perf_counter()
+    partial = _run_seed_range(
+        base_seed, matches, game_round,
+        [p.name for p in policies], rotate_seat=rotate_seat, global_base=base_seed,
+    )
+    partial["elapsed"] = time.perf_counter() - t0
+    return _merge_ranges([partial], matches, game_round)
+
+
+def run_matches_parallel(matches: int, game_round: int, policies: list, base_seed: int = 72001,
+                         workers: int = 0, progress: bool = True, rotate_seat: bool = True) -> dict:
+    """Shard ``matches`` seeds across ``workers`` processes and merge results."""
+    if workers <= 0:
+        workers = max(1, os.cpu_count() or 1)
+    workers = min(workers, matches)
+    policy_names = [p.name for p in policies]
+
+    # Contiguous seed shards, one per worker.
+    shard_counts = [matches // workers] * workers
+    for i in range(matches % workers):
+        shard_counts[i] += 1
+    cursor = base_seed
+    shards: list[tuple] = []
+    for count in shard_counts:
+        if count > 0:
+            shards.append((cursor, count, game_round, policy_names, rotate_seat, base_seed))
+            cursor += count
+
+    t0 = time.perf_counter()
+    if len(shards) == 1:
+        partial = _run_seed_range(*shards[0])
+        partial["elapsed"] = time.perf_counter() - t0
+        return _merge_ranges([partial], matches, game_round)
+
+    partials = []
+    with ProcessPoolExecutor(max_workers=len(shards)) as pool:
+        futs = {pool.submit(_run_seed_range, *sh): sh[0] for sh in shards}
+        done = 0
+        for fut in as_completed(futs):
+            done += 1
+            partials.append(fut.result())
+            if progress:
+                print(f"[worker {done}/{len(shards)}] seeds {futs[fut]}+ done", flush=True)
+    merged = _merge_ranges(partials, matches, game_round)
+    merged["elapsed"] = time.perf_counter() - t0  # wall clock, not worker-sum
+    return merged
 
 
 def _seat(name: str):
@@ -266,6 +375,8 @@ def _seat(name: str):
         return HeuristicSeat()
     if name == "heuristic-v3":
         return HeuristicV3Seat()
+    if name == "heuristic-v4":
+        return HeuristicV4Seat()
     raise KeyError(name)
 
 
@@ -277,16 +388,18 @@ def main() -> None:
     parser.add_argument("--new", type=str, default="efficiency", help="new seat policy name")
     parser.add_argument("--opponent", type=str, default="efficiency",
                         help="policy name for the other three seats")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="parallel processes (0 = auto, all cores)")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--no-rotate", action="store_true")
     args = parser.parse_args()
 
     policies = [_seat(args.new)] + [_seat(args.opponent)] * 3
     names = [p.name for p in policies]
-    result = asyncio.run(run_matches(
+    result = run_matches_parallel(
         args.matches, args.game_round, policies, base_seed=args.base_seed,
-        progress=not args.quiet, rotate_seat=not args.no_rotate,
-    ))
+        workers=args.workers, progress=not args.quiet, rotate_seat=not args.no_rotate,
+    )
     print(f"\n=== seats={names} ===")
     print(f"matches={result['matches']} elapsed={result['elapsed']:.1f}s "
           f"hands={result['hands_total']}")
