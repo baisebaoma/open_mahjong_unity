@@ -239,6 +239,96 @@ class HeuristicV4Seat:
         return choose_claim_plan(player.hand, player.melds, candidates, visible_codes(state, player.index))
 
 
+class HeuristicV5Seat:
+    """v5 heuristic + meld-weighted threat gate (D1)."""
+    name = "heuristic-v5"
+
+    def _opponents(self, state, player_index):
+        from server.gamestate.game_hongque.heuristic_bot_v3 import OpponentView
+        return tuple(
+            OpponentView.from_player(player)
+            for player in state.players
+            if player.index != player_index
+        )
+
+    def turn(self, state, player):
+        from server.gamestate.game_hongque.heuristic_bot_v5 import choose_turn_plan
+        return choose_turn_plan(
+            player.hand, player.melds, visible_codes(state, player.index),
+            kong_candidates(player.hand, player.melds),
+            supplements=player.supplements, wall_count=len(state.wall),
+            drawn_tile=player.drawn_tile, last_draw_was_supplement=player.last_draw_was_supplement,
+            opponents=self._opponents(state, player.index),
+        )
+
+    def claim(self, state, player, candidates):
+        from server.gamestate.game_hongque.heuristic_bot_v5 import choose_claim_plan
+        return choose_claim_plan(
+            player.hand, player.melds, candidates, visible_codes(state, player.index),
+            opponents=self._opponents(state, player.index), wall_count=len(state.wall),
+        )
+
+
+class HeuristicV6Seat:
+    """v6 heuristic + tenpai tie-break on safety (E3), v3 threat/claims."""
+    name = "heuristic-v6"
+
+    def _opponents(self, state, player_index):
+        from server.gamestate.game_hongque.heuristic_bot_v3 import OpponentView
+        return tuple(
+            OpponentView.from_player(player)
+            for player in state.players
+            if player.index != player_index
+        )
+
+    def turn(self, state, player):
+        from server.gamestate.game_hongque.heuristic_bot_v6 import choose_turn_plan
+        return choose_turn_plan(
+            player.hand, player.melds, visible_codes(state, player.index),
+            kong_candidates(player.hand, player.melds),
+            supplements=player.supplements, wall_count=len(state.wall),
+            drawn_tile=player.drawn_tile, last_draw_was_supplement=player.last_draw_was_supplement,
+            opponents=self._opponents(state, player.index),
+        )
+
+    def claim(self, state, player, candidates):
+        from server.gamestate.game_hongque.heuristic_bot_v6 import choose_claim_plan
+        return choose_claim_plan(
+            player.hand, player.melds, candidates, visible_codes(state, player.index),
+            opponents=self._opponents(state, player.index), wall_count=len(state.wall),
+        )
+
+
+class HeuristicV7Seat:
+    """v7 heuristic + D3 claim suppression only (v3 threat)."""
+    name = "heuristic-v7"
+
+    def _opponents(self, state, player_index):
+        from server.gamestate.game_hongque.heuristic_bot_v3 import OpponentView
+        return tuple(
+            OpponentView.from_player(player)
+            for player in state.players
+            if player.index != player_index
+        )
+
+    def turn(self, state, player):
+        from server.gamestate.game_hongque.heuristic_bot_v7 import choose_turn_plan
+        return choose_turn_plan(
+            player.hand, player.melds, visible_codes(state, player.index),
+            kong_candidates(player.hand, player.melds),
+            supplements=player.supplements, wall_count=len(state.wall),
+            drawn_tile=player.drawn_tile, last_draw_was_supplement=player.last_draw_was_supplement,
+            opponents=self._opponents(state, player.index),
+        )
+
+    def claim(self, state, player, candidates):
+        from server.gamestate.game_hongque.heuristic_bot_v7 import choose_claim_plan
+        return choose_claim_plan(
+            player.hand, player.melds, candidates, visible_codes(state, player.index),
+            opponents=self._opponents(state, player.index), wall_count=len(state.wall),
+        )
+
+
 def rank_scores(scores: list) -> list:
     order = sorted(range(4), key=lambda i: (-scores[i], i))
     ranks = [0] * 4
@@ -377,6 +467,12 @@ def _seat(name: str):
         return HeuristicV3Seat()
     if name == "heuristic-v4":
         return HeuristicV4Seat()
+    if name == "heuristic-v5":
+        return HeuristicV5Seat()
+    if name == "heuristic-v6":
+        return HeuristicV6Seat()
+    if name == "heuristic-v7":
+        return HeuristicV7Seat()
     raise KeyError(name)
 
 
