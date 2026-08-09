@@ -351,6 +351,7 @@ def _run_seed_range(base_seed: int, matches: int, game_round: int, policy_names:
     per_policy_net = [0.0] * len(policies)
     per_policy_rank: list[list[int]] = [[] for _ in range(len(policies))]
     per_policy_wins = [0] * len(policies)
+    per_policy_game_net: list[list[float]] = [[] for _ in range(len(policies))]
     draws = 0
     all_fans: list[int] = []
     for i in range(matches):
@@ -366,7 +367,9 @@ def _run_seed_range(base_seed: int, matches: int, game_round: int, policy_names:
         for s in range(4):
             policy_idx = (s - (g % 4)) % 4 if rotate_seat else s
             others = [scores[j] for j in range(4) if j != s]
-            per_policy_net[policy_idx] += scores[s] - mean(others)
+            net = scores[s] - mean(others)
+            per_policy_net[policy_idx] += net
+            per_policy_game_net[policy_idx].append(net)
             per_policy_rank[policy_idx].append(ranks[s])
             per_policy_wins[policy_idx] += result["wins"][s]
         draws += result["draws"]
@@ -374,6 +377,7 @@ def _run_seed_range(base_seed: int, matches: int, game_round: int, policy_names:
     return {
         "matches": matches,
         "per_policy_net": per_policy_net,
+        "per_policy_game_net": per_policy_game_net,
         "per_policy_rank": per_policy_rank,
         "per_policy_wins": per_policy_wins,
         "draws": draws,
@@ -385,9 +389,11 @@ def _merge_ranges(partials: list, matches: int, game_round: int) -> dict:
     n_policies = len(partials[0]["per_policy_net"])
     per_policy_net = [sum(p["per_policy_net"][i] for p in partials) for i in range(n_policies)]
     per_policy_rank: list[list[int]] = [[] for _ in range(n_policies)]
+    per_policy_game_net: list[list[float]] = [[] for _ in range(n_policies)]
     for p in partials:
         for i in range(n_policies):
             per_policy_rank[i].extend(p["per_policy_rank"][i])
+            per_policy_game_net[i].extend(p["per_policy_game_net"][i])
     per_policy_wins = [sum(p["per_policy_wins"][i] for p in partials) for i in range(n_policies)]
     draws = sum(p["draws"] for p in partials)
     all_fans: list[int] = []
@@ -399,6 +405,7 @@ def _merge_ranges(partials: list, matches: int, game_round: int) -> dict:
         "per_seat_net": [round(n, 2) for n in per_policy_net],
         "per_seat_avg_rank": [round(mean(r), 3) if r else 0.0 for r in per_policy_rank],
         "per_policy_rank": per_policy_rank,
+        "per_policy_game_net": per_policy_game_net,
         "per_seat_wins": per_policy_wins,
         "draws": draws,
         "avg_fan": round(mean(all_fans), 2) if all_fans else 0,

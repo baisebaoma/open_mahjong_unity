@@ -25,6 +25,24 @@ def report(name: str, ranks: list[int]) -> None:
           f"p(mean<2.5 one-sided)={one_sided_p:.4f}")
 
 
+def report_net(name: str, nets: list[float]) -> None:
+    """Per-match net points (own score - mean of 3 opponents) with 95% CI.
+
+    Each match is one big game = 16 small hands.  A positive lower bound means
+    the policy is significantly ahead of its opponents in raw scoring.
+    """
+    n = len(nets)
+    m = mean(nets)
+    se = st.sem(nets)
+    ci = st.t.interval(0.95, n - 1, loc=m, scale=se)
+    per_hand = m / 16.0
+    ci_low_hand = ci[0] / 16.0
+    one_sided_p = st.t.cdf(-m / se, n - 1) if se > 0 else 1.0
+    print(f"{name} net: per-match={m:+.2f} 95%CI=({ci[0]:+.2f},{ci[1]:+.2f}) "
+          f"per-hand={per_hand:+.3f} CI_low(per-hand)={ci_low_hand:+.3f} "
+          f"p(net>0 one-sided)={one_sided_p:.4f}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--matches", type=int, default=100)
@@ -49,8 +67,10 @@ def main() -> None:
               f"avg_rank={result['per_seat_avg_rank'][s]} wins={result['per_seat_wins'][s]}")
     print(f"draws={result['draws']} avg_fan={result['avg_fan']}")
     print()
+    nets = result["per_policy_game_net"]
     for s in range(4):
         report(names[s], ranks[s])
+        report_net(names[s], nets[s])
 
 
 if __name__ == "__main__":
